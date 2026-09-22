@@ -132,6 +132,9 @@ select.kindsel.other{border-color:#b7791f;color:#b7791f;font-weight:600}
 .pill{font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid var(--rule);color:var(--muted);white-space:nowrap}
 .pill.no{border-color:#b7791f;color:#b7791f;font-weight:600}
 .pill.yes{border-color:var(--green);color:var(--green)}
+input.pwd{font-size:11px;padding:3px 8px;width:auto;max-width:130px;border-radius:999px;
+  border:1px dashed var(--rule);background:#fff;color:var(--muted)}
+input.pwd.set{border-style:solid;border-color:var(--green);color:var(--ink)}
 #viewer{position:fixed;inset:0;background:rgba(27,42,74,.55);z-index:40;display:flex;flex-direction:column}
 #viewer .vbar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink);color:#fff}
 #viewer .vbar .vt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
@@ -717,11 +720,36 @@ function docRowHTML(d){
     <span class="ic">${esc(extOf(d.file_name).toUpperCase() || 'FILE')}</span>
     <span class="nm" style="cursor:pointer" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">${esc(d.file_name)}</span>
     ${kindSelectHTML(d)}
+    ${pwdInputHTML(d)}
   </div>`;
+}
+
+/** Bank statements arrive locked. Without the password the file opens for nobody. */
+function pwdInputHTML(d){
+  const has = !!d.file_password;
+  return `<input class="pwd${has?' set':''}" type="text" data-pwd-for="${esc(d.intake_id)}"
+    value="${esc(d.file_password||'')}" placeholder="password"
+    title="Password that opens this file, if the client sent one. Never a portal or bank login.">`;
+}
+
+async function wirePwdInputs(root, after){
+  root.querySelectorAll('input[data-pwd-for]').forEach(el=>{
+    el.onchange = async ()=>{
+      el.disabled = true;
+      const { error } = await sb.rpc('set_file_password',
+        { p_intake_id: el.dataset.pwdFor, p_password: el.value });
+      el.disabled = false;
+      if(error){ toast('Could not save: '+error.message); return; }
+      el.classList.toggle('set', !!el.value.trim());
+      toast(el.value.trim() ? 'Password saved for this file' : 'Password cleared');
+      if(after) after();
+    };
+  });
 }
 
 /** Saving a kind is what makes a document postable, so refresh the view after. */
 async function wireKindSelects(root, after){
+  wirePwdInputs(root, null);
   root.querySelectorAll('select[data-kind-for]').forEach(sel=>{
     sel.onchange = async ()=>{
       const id = sel.dataset.kindFor, val = sel.value;
@@ -801,10 +829,11 @@ function renderDocs(){
     t.innerHTML = '<tr><td style="padding:18px;color:var(--muted)">No documents match. Clients\u2019 attachments appear here once the Collector has run.</td></tr>';
     return;
   }
-  t.innerHTML = `<thead><tr><th>File</th><th>Client</th><th>Kind</th><th>Period</th><th>Ticket</th><th>Status</th><th>Received</th><th></th></tr></thead>
+  t.innerHTML = `<thead><tr><th>File</th><th>Client</th><th>Password</th><th>Kind</th><th>Period</th><th>Ticket</th><th>Status</th><th>Received</th><th></th></tr></thead>
     <tbody>${rows.map(d=>`<tr>
       <td>${esc(d.file_name)}</td>
       <td>${esc(d.client_name||'\u2014')}</td>
+      <td>${pwdInputHTML(d)}</td>
       <td>${d.status==='new' ? kindSelectHTML(d)
         : `<span class="kind${(!d.doc_kind||d.doc_kind==='other')?' other':''}">${esc(DOC_KINDS[d.doc_kind]||d.doc_kind||'Unclassified')}</span>`}</td>
       <td>${esc(d.period||'\u2014')}</td>
