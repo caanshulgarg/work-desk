@@ -120,6 +120,10 @@ main{overflow:auto;padding:22px 26px 40px}
 .doc .ic{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.04em}
 .kind{font-size:11px;border:1px solid var(--rule);border-radius:999px;padding:2px 8px;color:var(--muted);white-space:nowrap}
 .kind.other{border-color:var(--amber,#b7791f);color:var(--amber,#b7791f)}
+select.kindsel{font-size:11px;padding:3px 6px;width:auto;min-width:104px;border-radius:999px;
+  border:1px solid var(--rule);background:#fff;color:var(--muted)}
+select.kindsel.other{border-color:#b7791f;color:#b7791f;font-weight:600}
+.doc .kindsel{flex:0 0 auto}
 #viewer{position:fixed;inset:0;background:rgba(27,42,74,.55);z-index:40;display:flex;flex-direction:column}
 #viewer .vbar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink);color:#fff}
 #viewer .vbar .vt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
@@ -245,6 +249,7 @@ td.num{text-align:right}
         <select id="gKind" aria-label="Kind"><option value="">All kinds</option></select>
         <select id="gStatus" aria-label="Status"><option value="">All statuses</option></select>
         <button class="btn" id="gPull" type="button">Pull documents</button>
+        <button class="btn" id="gPost" type="button">Send to TDS Desk</button>
       </div>
       <p class="sub" id="gPullMsg" style="margin-top:-4px"></p>
       <div class="scroll"><table id="docTable"></table></div>
@@ -522,6 +527,7 @@ async function openTicket(id){
       <div id="dMsg" class="msg"></div>
     </div>`;
   wireDocButtons($('#dPanel'));
+  wireKindSelects($('#dPanel'), ()=>openTicket(id));
   $('#drawer').classList.remove('hidden');
   $('#dClose').focus();
 
@@ -629,18 +635,42 @@ $('#callForm').addEventListener('submit', async e=>{
 const IMG_EXT = ['jpg','jpeg','png','gif','webp','bmp','heic'];
 const extOf = n => (String(n||'').split('.').pop()||'').toLowerCase();
 
-function docRowHTML(d){
-  const k = DOC_KINDS[d.doc_kind] || d.doc_kind || 'Unclassified';
+function kindSelectHTML(d){
+  const cur = d.doc_kind || 'other';
   const unclassified = !d.doc_kind || d.doc_kind === 'other';
-  return `<button class="doc" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">
+  return `<select class="kindsel${unclassified?' other':''}" data-kind-for="${esc(d.intake_id)}"
+     title="What kind of document is this? Unclassified documents are not sent to TDS Desk.">
+    ${Object.entries(DOC_KINDS).map(([k,v])=>
+      `<option value="${k}" ${k===cur?'selected':''}>${esc(v)}</option>`).join('')}
+  </select>`;
+}
+
+function docRowHTML(d){
+  return `<div class="doc" style="cursor:default">
     <span class="ic">${esc(extOf(d.file_name).toUpperCase() || 'FILE')}</span>
-    <span class="nm">${esc(d.file_name)}</span>
-    <span class="kind${unclassified?' other':''}">${esc(k)}</span>
-  </button>`;
+    <span class="nm" style="cursor:pointer" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">${esc(d.file_name)}</span>
+    ${kindSelectHTML(d)}
+  </div>`;
+}
+
+/** Saving a kind is what makes a document postable, so refresh the view after. */
+async function wireKindSelects(root, after){
+  root.querySelectorAll('select[data-kind-for]').forEach(sel=>{
+    sel.onchange = async ()=>{
+      const id = sel.dataset.kindFor, val = sel.value;
+      sel.disabled = true;
+      const { error } = await sb.rpc('set_doc_kind', { p_intake_id: id, p_kind: val });
+      sel.disabled = false;
+      if(error){ toast('Could not save: '+error.message); return; }
+      sel.classList.toggle('other', val==='other');
+      toast(val==='other' ? 'Left unclassified \u2014 it will not go to TDS Desk' : 'Set to '+DOC_KINDS[val]);
+      if(after) after();
+    };
+  });
 }
 
 function wireDocButtons(root){
-  root.querySelectorAll('.doc[data-path]').forEach(b=>{
+  root.querySelectorAll('[data-path]').forEach(b=>{
     b.onclick = () => openDoc(b.dataset.path, b.dataset.name);
   });
 }
@@ -675,9 +705,13 @@ $('#vClose').onclick = closeViewer;
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('#viewer').classList.contains('hidden')) closeViewer(); });
 
 async function loadDocs(){
-  const { data, error } = await sb.from('v_ticket_docs').select('*').order('created_at',{ascending:false});
-  if(error){ toast('Could not load documents: '+error.message); return; }
-  DOCS = data || [];
+  const [docsRes, queueRes] = await Promise.all([
+    sb.from('v_ticket_docs').select('*').order('created_at',{ascending:false}),
+    sb.from('v_poster_queue').select('intake_id,postable')
+  ]);
+  if(docsRes.error){ toast('Could not load documents: '+docsRes.error.message); return; }
+  const post = new Map((queueRes.data||[]).map(r=>[r.intake_id, r.postable]));
+  DOCS = (docsRes.data || []).map(d=>({ ...d, postable: post.get(d.intake_id) || null }));
   const gc=$('#gClient'); gc.length=1;
   [...new Set(DOCS.map(d=>d.client_name).filter(Boolean))].sort().forEach(n=>gc.add(new Option(n,n)));
   const gk=$('#gKind'); if(gk.options.length===1) Object.entries(DOC_KINDS).forEach(([k,v])=>gk.add(new Option(v,k)));
@@ -704,15 +738,50 @@ function renderDocs(){
     <tbody>${rows.map(d=>`<tr>
       <td>${esc(d.file_name)}</td>
       <td>${esc(d.client_name||'\u2014')}</td>
-      <td><span class="kind${(!d.doc_kind||d.doc_kind==='other')?' other':''}">${esc(DOC_KINDS[d.doc_kind]||d.doc_kind||'Unclassified')}</span></td>
+      <td>${d.status==='new' ? kindSelectHTML(d)
+        : `<span class="kind${(!d.doc_kind||d.doc_kind==='other')?' other':''}">${esc(DOC_KINDS[d.doc_kind]||d.doc_kind||'Unclassified')}</span>`}</td>
       <td>${esc(d.period||'\u2014')}</td>
       <td>#${esc(d.ref_no)}</td>
-      <td>${esc(DOC_STATUS[d.status]||d.status)}</td>
+      <td>${esc(DOC_STATUS[d.status]||d.status)}${
+        d.postable==='ready' ? ' <span class="kind">ready</span>'
+        : d.postable==='unclassified' ? ' <span class="kind other">needs kind</span>'
+        : d.postable==='no_tds_client' ? ' <span class="kind other">no TDS client</span>' : ''}</td>
       <td>${fmtDate(d.received_at)}</td>
       <td><button class="doc" style="padding:5px 10px;background:#fff" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">Open</button></td>
     </tr>`).join('')}</tbody>`;
   wireDocButtons(t);
+  wireKindSelects(t, loadDocs);
 }
+
+async function sendToTdsDesk(){
+  const btn=$('#gPost'), msg=$('#gPullMsg');
+  const ready = DOCS.filter(d=>d.postable==='ready').length;
+  const unclassified = DOCS.filter(d=>d.postable==='unclassified').length;
+  const unmapped = DOCS.filter(d=>d.postable==='no_tds_client').length;
+
+  if(!ready){
+    msg.textContent = 'Nothing ready to send.'
+      + (unclassified?` ${unclassified} still need a kind \u2014 set it in the Kind column.`:'')
+      + (unmapped?` ${unmapped} belong to a client with no TDS Desk record.`:'');
+    return;
+  }
+
+  btn.disabled = true;
+  msg.textContent = `Sending ${ready} document${ready===1?'':'s'} to TDS Desk\u2026`;
+  const { error } = await sb.rpc('run_poster', { p_mirror_only: false });
+  if(error){ msg.textContent='Could not start: '+error.message; btn.disabled=false; return; }
+
+  // The Poster runs in the background; look again once it has had a moment.
+  setTimeout(async ()=>{
+    await loadDocs();
+    const left = DOCS.filter(d=>d.postable==='ready').length;
+    msg.textContent = left
+      ? `${ready-left} sent, ${left} still waiting \u2014 press again in a moment.`
+      : `Done. ${ready} document${ready===1?'':'s'} sent to TDS Desk.`;
+    btn.disabled = false;
+  }, 8000);
+}
+$('#gPost').onclick = sendToTdsDesk;
 ['#gSearch','#gClient','#gKind','#gStatus'].forEach(s=>{
   const el=$(s); el.addEventListener(s==='#gSearch'?'input':'change', renderDocs);
 });
