@@ -124,6 +124,14 @@ select.kindsel{font-size:11px;padding:3px 6px;width:auto;min-width:104px;border-
   border:1px solid var(--rule);background:#fff;color:var(--muted)}
 select.kindsel.other{border-color:#b7791f;color:#b7791f;font-weight:600}
 .doc .kindsel{flex:0 0 auto}
+.linkwarn{background:#fff8ec;border:1px solid #e6c98a;border-radius:var(--radius-m);
+  padding:12px 14px;margin-bottom:12px;font-size:13px}
+.linkwarn b{display:block;margin-bottom:4px}
+.linkrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.linkrow input,.linkrow select{width:auto;min-width:220px}
+.pill{font-size:11px;border-radius:999px;padding:2px 9px;border:1px solid var(--rule);color:var(--muted);white-space:nowrap}
+.pill.no{border-color:#b7791f;color:#b7791f;font-weight:600}
+.pill.yes{border-color:var(--green);color:var(--green)}
 #viewer{position:fixed;inset:0;background:rgba(27,42,74,.55);z-index:40;display:flex;flex-direction:column}
 #viewer .vbar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink);color:#fff}
 #viewer .vbar .vt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
@@ -230,6 +238,7 @@ td.num{text-align:right}
     <section id="v-clients" class="hidden">
       <p class="today">Clients</p>
       <p class="sub" id="clientsSub"></p>
+      <div id="clientWarn"></div>
       <div class="filters"><input type="search" id="cSearch" placeholder="Search name, PAN or GSTIN"></div>
       <div class="scroll"><table id="clientTable"></table></div>
     </section>
@@ -576,19 +585,77 @@ async function loadDue(){
 }
 
 /* ---------- clients ---------- */
+let TDSDIR = [], CLIENTTDS = [];
+
+async function loadTdsStatus(){
+  const [st, dir] = await Promise.all([
+    sb.from('v_client_tds_status').select('*').order('client_name'),
+    sb.from('tds_client_directory').select('*').order('client_name')
+  ]);
+  CLIENTTDS = st.data || [];
+  TDSDIR    = dir.data || [];
+  if(st.error) toast('Could not read TDS Desk links: '+st.error.message);
+}
+
+/** Clients whose documents can never reach TDS Desk, because nothing is linked. */
+function unlinkedHTML(){
+  const bad = CLIENTTDS.filter(c=>!c.linked && c.documents_waiting > 0);
+  if(!bad.length) return '';
+  return `<div class="linkwarn"><b>Not linked to TDS Desk</b>
+    ${bad.map(c=>`${esc(c.client_name)} — ${c.documents_waiting} document${c.documents_waiting===1?'':'s'} waiting`).join('<br>')}
+    <div style="color:var(--muted);margin-top:6px">Their documents stay in Work Desk until the client is linked. Link them on the Clients tab.</div></div>`;
+}
+
+function tdsCellHTML(c){
+  if(c.linked) return `<span class="pill yes">${esc(c.tds_client_name || c.tds_client_id)}</span>`;
+  if(!isPartner()) return `<span class="pill no">not linked</span>`;
+  const opts = TDSDIR.map(d=>
+    `<option value="${esc(d.firm_id)}|${esc(d.client_id)}">${esc(d.client_name)} — ${esc(d.firm_name)}</option>`).join('');
+  return `<span class="pill no">not linked</span>
+    <div class="linkrow">
+      <select data-link-for="${esc(c.client_id)}">
+        <option value="">Choose the TDS Desk client…</option>${opts}
+      </select>
+      <button class="btn ghost" data-link-go="${esc(c.client_id)}" style="padding:5px 10px">Link</button>
+    </div>`;
+}
+
+function wireTdsLinks(root){
+  root.querySelectorAll('[data-link-go]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const cid = btn.dataset.linkGo;
+      const sel = root.querySelector(`[data-link-for="${cid}"]`);
+      if(!sel || !sel.value){ toast('Choose the TDS Desk client first'); return; }
+      const [firm, tds] = sel.value.split('|');
+      btn.disabled = true;
+      const { error } = await sb.rpc('set_tds_client',
+        { p_client_id: cid, p_tds_firm_id: firm, p_tds_client_id: tds });
+      btn.disabled = false;
+      if(error){ toast(error.message); return; }
+      toast('Linked to TDS Desk');
+      await loadTdsStatus(); renderClients();
+    };
+  });
+}
+
 function renderClients(){
   const q=$('#cSearch').value.toLowerCase();
   const list=CLIENTS.filter(c=>!q || [c.name,c.pan,c.gstin].some(v=>(v||'').toLowerCase().includes(q)));
-  $('#clientsSub').textContent = `${CLIENTS.length} clients you can see.`;
-  $('#clientTable').innerHTML = `<tr><th>Client</th><th>PAN / GSTIN</th><th>Manager</th><th>Contacts</th><th>Services</th></tr>` +
+  const unlinked = CLIENTTDS.filter(c=>!c.linked).length;
+  $('#clientsSub').innerHTML = `${CLIENTS.length} clients you can see.`
+    + (unlinked ? ` <span class="pill no">${unlinked} not linked to TDS Desk</span>` : '');
+  $('#clientWarn').innerHTML = unlinkedHTML();
+  $('#clientTable').innerHTML = `<tr><th>Client</th><th>PAN / GSTIN</th><th>Manager</th><th>TDS Desk</th><th>Contacts</th><th>Services</th></tr>` +
     (list.length ? list.map(c=>{ const m=STAFF.find(s=>s.id===c.manager_id), b=STAFF.find(s=>s.id===c.backup_manager_id);
       return `<tr><td><strong>${esc(c.name)}</strong>${c.partner_only?' <span class="pill" style="color:var(--red)">Partner only</span>':''}<br>
           <span style="color:var(--muted);font-size:12px">${esc(c.entity_type)}${c.tally_company_name?', Tally: '+esc(c.tally_company_name):''}</span></td>
         <td>${esc(c.pan||'—')}<br><span style="color:var(--muted)">${esc(c.gstin||'')}</span></td>
         <td>${esc(m?.name||'—')}${b?'<br><span style="color:var(--muted);font-size:12px">Backup: '+esc(b.name)+'</span>':''}</td>
+        <td>${tdsCellHTML(CLIENTTDS.find(x=>x.client_id===c.id) || {client_id:c.id, linked:false})}</td>
         <td style="font-size:13px">${(c.emails||[]).map(esc).join('<br>')}${(c.whatsapp_numbers||[]).length?'<br>'+c.whatsapp_numbers.map(esc).join(', '):''}</td>
         <td>${(c.services||[]).map(s=>`<span class="pill">${esc(s)}</span>`).join('')}</td></tr>`; }).join('')
-     : '<tr><td colspan="5" class="empty">No client matches that search.</td></tr>');
+     : '<tr><td colspan="6" class="empty">No client matches that search.</td></tr>');
+  wireTdsLinks($('#clientTable'));
 }
 $('#cSearch').addEventListener('input', renderClients);
 
@@ -760,6 +827,7 @@ async function sendToTdsDesk(){
   const unmapped = DOCS.filter(d=>d.postable==='no_tds_client').length;
 
   if(!ready){
+    $('#gPullMsg').innerHTML = unlinkedHTML();
     msg.textContent = 'Nothing ready to send.'
       + (unclassified?` ${unclassified} still need a kind \u2014 set it in the Kind column.`:'')
       + (unmapped?` ${unmapped} belong to a client with no TDS Desk record.`:'');
@@ -833,7 +901,7 @@ document.querySelectorAll('nav button[data-view]').forEach(b=>b.addEventListener
   b.setAttribute('aria-current','true');
   document.querySelectorAll('main > section').forEach(s=>s.classList.add('hidden'));
   const v=b.dataset.view; $('#v-'+v).classList.remove('hidden');
-  if(v==='clients') renderClients();
+  if(v==='clients') loadTdsStatus().then(renderClients);
   if(v==='archive') loadArchive();
   if(v==='documents') loadDocs();
   if(v==='scorecard') loadScore();
