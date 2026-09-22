@@ -112,6 +112,22 @@ main{overflow:auto;padding:22px 26px 40px}
 .quote{white-space:pre-wrap;background:var(--paper);border-radius:var(--radius-s);padding:10px 12px}
 .bar{height:8px;background:var(--rule);border-radius:4px;overflow:hidden;margin:6px 0}
 .bar b{display:block;height:100%;background:var(--green)}
+.docs{display:flex;flex-direction:column;gap:6px}
+.doc{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--paper);
+  border:1px solid var(--rule);border-radius:var(--radius-s);padding:9px 11px;cursor:pointer;font:inherit;color:inherit}
+.doc:hover{border-color:var(--ink);background:#fff}
+.doc .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.doc .ic{font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.04em}
+.kind{font-size:11px;border:1px solid var(--rule);border-radius:999px;padding:2px 8px;color:var(--muted);white-space:nowrap}
+.kind.other{border-color:var(--amber,#b7791f);color:var(--amber,#b7791f)}
+#viewer{position:fixed;inset:0;background:rgba(27,42,74,.55);z-index:40;display:flex;flex-direction:column}
+#viewer .vbar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--ink);color:#fff}
+#viewer .vbar .vt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+#viewer .vbar a,#viewer .vbar button{font-size:13px}
+#vBody{flex:1;background:#fff;display:flex;align-items:center;justify-content:center;overflow:auto}
+#vBody iframe{width:100%;height:100%;border:0}
+#vBody img{max-width:100%;max-height:100%;object-fit:contain}
+.vnone{padding:40px;text-align:center;color:var(--muted)}
 
 /* ---------- tables ---------- */
 table{width:100%;border-collapse:collapse;background:var(--sheet);border:1px solid var(--rule);border-radius:var(--radius-m);overflow:hidden}
@@ -172,6 +188,7 @@ td.num{text-align:right}
     <button data-view="unassigned" id="nav-unassigned">Unassigned <span class="count" id="c-unassigned">0</span></button>
     <button data-view="due">Due dates <span class="count" id="c-due">0</span></button>
     <button data-view="clients">Clients</button>
+    <button data-view="documents">Documents</button>
     <button data-view="archive">Filed returns</button>
     <button data-view="scorecard" id="nav-scorecard">Scorecard</button>
     <button data-view="call">Log a call</button>
@@ -219,6 +236,20 @@ td.num{text-align:right}
       <div class="scroll"><table id="archiveTable"></table></div>
     </section>
 
+    <section id="v-documents" class="hidden">
+      <p class="today">Documents</p>
+      <p class="sub">Everything clients have sent in. Click any file to read it here.</p>
+      <div class="filters">
+        <input type="search" id="gSearch" placeholder="Search file name or client">
+        <select id="gClient" aria-label="Client"><option value="">All clients</option></select>
+        <select id="gKind" aria-label="Kind"><option value="">All kinds</option></select>
+        <select id="gStatus" aria-label="Status"><option value="">All statuses</option></select>
+        <button class="btn" id="gPull" type="button">Pull documents</button>
+      </div>
+      <p class="sub" id="gPullMsg" style="margin-top:-4px"></p>
+      <div class="scroll"><table id="docTable"></table></div>
+    </section>
+
     <section id="v-scorecard" class="hidden">
       <p class="today">Manager scorecard</p>
       <p class="sub">This month. Reply time counts from when the message arrived.</p>
@@ -249,6 +280,15 @@ td.num{text-align:right}
 <div id="drawer" class="hidden" role="dialog" aria-modal="true" aria-labelledby="dTitle">
   <div class="panel" id="dPanel"></div>
 </div>
+<!-- ============ DOCUMENT VIEWER ============ -->
+<div id="viewer" class="hidden" role="dialog" aria-modal="true" aria-labelledby="vTitle">
+  <div class="vbar">
+    <span class="vt" id="vTitle">Document</span>
+    <a class="btn ghost" id="vDownload" href="#" download>Download</a>
+    <button class="btn ghost" id="vClose">Close</button>
+  </div>
+  <div id="vBody"></div>
+</div>
 <div id="toast" class="toast hidden" role="status"></div>
 
 <script>
@@ -264,7 +304,9 @@ const RAIL = ['new','data_awaited','collected','processing','ready','reviewed','
 const TYPES = {gst:'GST',itr:'ITR',tds:'TDS',roc:'ROC',audit:'Audit',certificate:'Certificate',books:'Books',mis:'MIS',query:'Query',other:'Other'};
 const EVIDENCE = ['ARN','ACK','UDIN','SRN','CIN','Other'];
 
-let ME = null, TICKETS = [], CLIENTS = [], STAFF = [];
+const DOC_KINDS = {sales:'Sales',purchase:'Purchase',bank:'Bank',expense:'Expense',gstr2b:'GSTR-2B',itr:'ITR',notice:'Notice',other:'Unclassified'};
+const DOC_STATUS = {new:'Not posted',pushed:'In TDS Desk',filed:'Filed',duplicate:'Duplicate',rejected:'Rejected'};
+let ME = null, TICKETS = [], CLIENTS = [], STAFF = [], DOCS = [];
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -417,6 +459,8 @@ async function openTicket(id){
     const { error } = await sb.from('tickets').update({ seen_at:new Date().toISOString() }).eq('id',id);
     if(!error){ full.seen_at=new Date().toISOString(); t.seen_at=full.seen_at; t.unseen_alert=false; renderQueue(); }
   }
+  const { data:tdocs } = await sb.from('v_ticket_docs').select('*').eq('ticket_id',id);
+  const docs = tdocs || [];
   const c = CLIENTS.find(x=>x.id===full.client_id);
   const mgr = STAFF.find(x=>x.id===full.manager_id);
   const pct = full.docs_total ? Math.round(full.docs_posted/full.docs_total*100) : 0;
@@ -438,6 +482,11 @@ async function openTicket(id){
     </dl>
 
     <div class="box"><h3>${esc(full.subject)}</h3><div class="quote">${esc(full.body)}</div></div>
+
+    ${docs.length ? `<div class="box"><h3>Documents received (${docs.length})</h3>
+      <div class="docs">${docs.map(docRowHTML).join('')}</div>
+      ${docs.some(d=>!d.doc_kind||d.doc_kind==='other') ? '<div style="color:var(--muted);font-size:12px;margin-top:8px">Some files are still unclassified. Open them and set the kind before they go to TDS Desk.</div>':''}
+      </div>`:''}
 
     ${full.docs_total ? `<div class="box"><h3>Entries in TDS Desk</h3>
       <div>${full.docs_posted} of ${full.docs_total} posted. ${full.docs_pending} still pending.</div>
@@ -472,6 +521,7 @@ async function openTicket(id){
       <div class="row" style="margin-top:12px"><button class="btn" id="dSave">Save stage</button></div>
       <div id="dMsg" class="msg"></div>
     </div>`;
+  wireDocButtons($('#dPanel'));
   $('#drawer').classList.remove('hidden');
   $('#dClose').focus();
 
@@ -575,6 +625,139 @@ $('#callForm').addEventListener('submit', async e=>{
   e.target.reset(); loadAll();
 });
 
+/* ---------- documents ---------- */
+const IMG_EXT = ['jpg','jpeg','png','gif','webp','bmp','heic'];
+const extOf = n => (String(n||'').split('.').pop()||'').toLowerCase();
+
+function docRowHTML(d){
+  const k = DOC_KINDS[d.doc_kind] || d.doc_kind || 'Unclassified';
+  const unclassified = !d.doc_kind || d.doc_kind === 'other';
+  return `<button class="doc" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">
+    <span class="ic">${esc(extOf(d.file_name).toUpperCase() || 'FILE')}</span>
+    <span class="nm">${esc(d.file_name)}</span>
+    <span class="kind${unclassified?' other':''}">${esc(k)}</span>
+  </button>`;
+}
+
+function wireDocButtons(root){
+  root.querySelectorAll('.doc[data-path]').forEach(b=>{
+    b.onclick = () => openDoc(b.dataset.path, b.dataset.name);
+  });
+}
+
+async function openDoc(path, name){
+  toast('Opening…');
+  const { data, error } = await sb.storage.from('client-docs').createSignedUrl(path, 600);
+  if(error || !data || !data.signedUrl){
+    toast('Could not open this file: ' + (error ? error.message : 'no link returned')); return;
+  }
+  const url = data.signedUrl, ext = extOf(name);
+  const body = $('#vBody'); body.innerHTML = '';
+  if(ext === 'pdf'){
+    const f = document.createElement('iframe'); f.src = url; f.title = name; body.append(f);
+  } else if(IMG_EXT.includes(ext)){
+    const im = document.createElement('img'); im.src = url; im.alt = name; body.append(im);
+  } else {
+    const d = document.createElement('div'); d.className = 'vnone';
+    const p1 = document.createElement('p');
+    p1.textContent = 'This file type can only be opened outside the browser.';
+    const a = document.createElement('a'); a.className='btn'; a.href=url; a.download=name;
+    a.textContent = 'Download ' + name;
+    d.append(p1, a); body.append(d);
+  }
+  $('#vTitle').textContent = name;
+  const dl = $('#vDownload'); dl.href = url; dl.setAttribute('download', name);
+  $('#viewer').classList.remove('hidden');
+  $('#vClose').focus();
+}
+function closeViewer(){ $('#viewer').classList.add('hidden'); $('#vBody').innerHTML=''; }
+$('#vClose').onclick = closeViewer;
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('#viewer').classList.contains('hidden')) closeViewer(); });
+
+async function loadDocs(){
+  const { data, error } = await sb.from('v_ticket_docs').select('*').order('created_at',{ascending:false});
+  if(error){ toast('Could not load documents: '+error.message); return; }
+  DOCS = data || [];
+  const gc=$('#gClient'); gc.length=1;
+  [...new Set(DOCS.map(d=>d.client_name).filter(Boolean))].sort().forEach(n=>gc.add(new Option(n,n)));
+  const gk=$('#gKind'); if(gk.options.length===1) Object.entries(DOC_KINDS).forEach(([k,v])=>gk.add(new Option(v,k)));
+  const gs=$('#gStatus'); if(gs.options.length===1) Object.entries(DOC_STATUS).forEach(([k,v])=>gs.add(new Option(v,k)));
+  renderDocs();
+}
+
+function renderDocs(){
+  const q=($('#gSearch').value||'').toLowerCase().trim();
+  const cl=$('#gClient').value, kd=$('#gKind').value, st=$('#gStatus').value;
+  const rows = DOCS.filter(d=>{
+    if(cl && d.client_name!==cl) return false;
+    if(kd && d.doc_kind!==kd) return false;
+    if(st && d.status!==st) return false;
+    if(q && !((d.file_name||'').toLowerCase().includes(q) || (d.client_name||'').toLowerCase().includes(q))) return false;
+    return true;
+  });
+  const t=$('#docTable');
+  if(!rows.length){
+    t.innerHTML = '<tr><td style="padding:18px;color:var(--muted)">No documents match. Clients\u2019 attachments appear here once the Collector has run.</td></tr>';
+    return;
+  }
+  t.innerHTML = `<thead><tr><th>File</th><th>Client</th><th>Kind</th><th>Period</th><th>Ticket</th><th>Status</th><th>Received</th><th></th></tr></thead>
+    <tbody>${rows.map(d=>`<tr>
+      <td>${esc(d.file_name)}</td>
+      <td>${esc(d.client_name||'\u2014')}</td>
+      <td><span class="kind${(!d.doc_kind||d.doc_kind==='other')?' other':''}">${esc(DOC_KINDS[d.doc_kind]||d.doc_kind||'Unclassified')}</span></td>
+      <td>${esc(d.period||'\u2014')}</td>
+      <td>#${esc(d.ref_no)}</td>
+      <td>${esc(DOC_STATUS[d.status]||d.status)}</td>
+      <td>${fmtDate(d.received_at)}</td>
+      <td><button class="doc" style="padding:5px 10px;background:#fff" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">Open</button></td>
+    </tr>`).join('')}</tbody>`;
+  wireDocButtons(t);
+}
+['#gSearch','#gClient','#gKind','#gStatus'].forEach(s=>{
+  const el=$(s); el.addEventListener(s==='#gSearch'?'input':'change', renderDocs);
+});
+
+async function pullDocuments(){
+  const btn=$('#gPull'), msg=$('#gPullMsg');
+  btn.disabled = true;
+  msg.textContent = 'Looking for tickets whose attachments have not been pulled in yet\u2026';
+
+  // Tickets this user can see that arrived by email and have no documents recorded.
+  const { data:pending, error } = await sb.from('v_ticket_board')
+    .select('id,ref_no,client_name,docs_total').eq('source','email');
+  if(error){ msg.textContent='Could not check: '+error.message; btn.disabled=false; return; }
+
+  const have = new Set(DOCS.map(d=>d.ticket_id));
+  const todo = (pending||[]).filter(t=>!t.docs_total && !have.has(t.id));
+
+  if(!todo.length){
+    msg.textContent = 'Nothing to pull \u2014 every email ticket you can see already has its documents.';
+    btn.disabled=false; return;
+  }
+
+  let asked=0, failed=0;
+  for(const t of todo){
+    const { error:e } = await sb.rpc('request_attachment_fetch', { p_ticket_id: t.id });
+    if(e) failed++; else asked++;
+  }
+
+  msg.textContent = `Asked for ${asked} ticket${asked===1?'':'s'}`
+    + (failed?`, ${failed} refused`:'')
+    + '. Files arrive in a few seconds \u2014 this list refreshes automatically.';
+  toast('Pulling documents\u2026');
+
+  // The fetch runs in the background, so look again shortly.
+  setTimeout(async ()=>{
+    await loadDocs();
+    const now = DOCS.length;
+    msg.textContent = now
+      ? `Done. ${now} document${now===1?'':'s'} in the list.`
+      : 'Finished, but nothing came back. The mail may have had no attachments.';
+    btn.disabled = false;
+  }, 6000);
+}
+$('#gPull').onclick = pullDocuments;
+
 /* ---------- navigation ---------- */
 document.querySelectorAll('nav button[data-view]').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('nav button[data-view]').forEach(x=>x.removeAttribute('aria-current'));
@@ -583,6 +766,7 @@ document.querySelectorAll('nav button[data-view]').forEach(b=>b.addEventListener
   const v=b.dataset.view; $('#v-'+v).classList.remove('hidden');
   if(v==='clients') renderClients();
   if(v==='archive') loadArchive();
+  if(v==='documents') loadDocs();
   if(v==='scorecard') loadScore();
   if(v==='due') loadDue();
 }));
