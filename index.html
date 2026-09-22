@@ -123,6 +123,17 @@ main{overflow:auto;padding:22px 26px 40px}
 select.kindsel{font-size:11px;padding:3px 6px;width:auto;min-width:104px;border-radius:999px;
   border:1px solid var(--rule);background:#fff;color:var(--muted)}
 select.kindsel.other{border-color:#b7791f;color:#b7791f;font-weight:600}
+/* A suggestion is shown in the box but is NOT saved. Dashed blue says "proposed". */
+select.kindsel.suggested{border-style:dashed;border-color:#2b6cb0;color:#2b6cb0;font-weight:600}
+button.acc{font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #2b6cb0;
+  background:#fff;color:#2b6cb0;font-weight:600;cursor:pointer;white-space:nowrap}
+button.acc:hover{background:#2b6cb0;color:#fff}
+.sugg{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4;max-width:420px}
+.sugg b{color:#2b6cb0;font-weight:600}
+.conf{font-size:10px;border:1px solid var(--rule);border-radius:999px;padding:1px 6px;
+  margin-left:5px;color:var(--muted);text-transform:lowercase}
+.conf.high{border-color:var(--green);color:var(--green)}
+.conf.low{border-color:#b7791f;color:#b7791f}
 .doc .kindsel{flex:0 0 auto}
 .linkwarn{background:#fff8ec;border:1px solid #e6c98a;border-radius:var(--radius-m);
   padding:12px 14px;margin-bottom:12px;font-size:13px}
@@ -261,6 +272,8 @@ td.num{text-align:right}
         <select id="gKind" aria-label="Kind"><option value="">All kinds</option></select>
         <select id="gStatus" aria-label="Status"><option value="">All statuses</option></select>
         <button class="btn" id="gPull" type="button">Pull documents</button>
+        <button class="btn" id="gSuggest" type="button">Suggest kinds</button>
+        <button class="btn" id="gAccept" type="button">Accept suggestions</button>
         <button class="btn" id="gPost" type="button">Send to TDS Desk</button>
       </div>
       <p class="sub" id="gPullMsg" style="margin-top:-4px"></p>
@@ -705,14 +718,34 @@ $('#callForm').addEventListener('submit', async e=>{
 const IMG_EXT = ['jpg','jpeg','png','gif','webp','bmp','heic'];
 const extOf = n => (String(n||'').split('.').pop()||'').toLowerCase();
 
+/**
+ * The box shows the classifier's proposal when there is one, but a proposal is
+ * not a decision: nothing is saved until this person changes the box or presses
+ * Accept. That is why it stays dashed and why the row still reads "needs kind".
+ */
 function kindSelectHTML(d){
-  const cur = d.doc_kind || 'other';
-  const unclassified = !d.doc_kind || d.doc_kind === 'other';
-  return `<select class="kindsel${unclassified?' other':''}" data-kind-for="${esc(d.intake_id)}"
-     title="What kind of document is this? Unclassified documents are not sent to TDS Desk.">
+  const unset = !d.doc_kind || d.doc_kind === 'other';
+  const sugg  = unset && d.suggested_kind && DOC_KINDS[d.suggested_kind] ? d.suggested_kind : null;
+  const cur   = sugg || d.doc_kind || 'other';
+  const cls   = sugg ? ' suggested' : (unset ? ' other' : '');
+  return `<select class="kindsel${cls}" data-kind-for="${esc(d.intake_id)}"
+     title="${sugg ? 'Suggested, not yet saved \u2014 change it or press Accept.'
+                   : 'What kind of document is this? Unclassified documents are not sent to TDS Desk.'}">
     ${Object.entries(DOC_KINDS).map(([k,v])=>
       `<option value="${k}" ${k===cur?'selected':''}>${esc(v)}</option>`).join('')}
-  </select>`;
+  </select>${sugg ? `<button class="acc" type="button" data-accept="${esc(d.intake_id)}"
+     data-kind="${esc(sugg)}" title="Save this as the document kind">Accept</button>` : ''}`;
+}
+
+/** Why the classifier thinks so, so nobody has to open the file to check it. */
+function suggestReasonHTML(d){
+  if(!d.suggest_reason) return '';
+  if(d.doc_kind && d.doc_kind !== 'other') return '';
+  const c = d.suggest_conf || 'low';
+  const head = d.suggested_kind && DOC_KINDS[d.suggested_kind]
+    ? `<b>Looks like ${esc(DOC_KINDS[d.suggested_kind])}</b><span class="conf ${esc(c)}">${esc(c)}</span> \u2014 `
+    : '<b>Could not tell</b> \u2014 ';
+  return `<div class="sugg">${head}${esc(d.suggest_reason)}</div>`;
 }
 
 function docRowHTML(d){
@@ -721,6 +754,7 @@ function docRowHTML(d){
     <span class="nm" style="cursor:pointer" data-path="${esc(d.file_path)}" data-name="${esc(d.file_name)}">${esc(d.file_name)}</span>
     ${kindSelectHTML(d)}
     ${pwdInputHTML(d)}
+    ${suggestReasonHTML(d) ? `<div style="flex-basis:100%">${suggestReasonHTML(d)}</div>` : ''}
   </div>`;
 }
 
@@ -748,8 +782,23 @@ async function wirePwdInputs(root, after){
 }
 
 /** Saving a kind is what makes a document postable, so refresh the view after. */
+async function saveKind(id, val){
+  const { error } = await sb.rpc('set_doc_kind', { p_intake_id: id, p_kind: val });
+  return error;
+}
+
 async function wireKindSelects(root, after){
   wirePwdInputs(root, null);
+  root.querySelectorAll('button[data-accept]').forEach(b=>{
+    b.onclick = async ()=>{
+      b.disabled = true;
+      const err = await saveKind(b.dataset.accept, b.dataset.kind);
+      b.disabled = false;
+      if(err){ toast('Could not save: '+err.message); return; }
+      toast('Set to '+DOC_KINDS[b.dataset.kind]);
+      if(after) after();
+    };
+  });
   root.querySelectorAll('select[data-kind-for]').forEach(sel=>{
     sel.onchange = async ()=>{
       const id = sel.dataset.kindFor, val = sel.value;
@@ -814,16 +863,20 @@ async function loadDocs(){
   renderDocs();
 }
 
-function renderDocs(){
+function filteredDocs(){
   const q=($('#gSearch').value||'').toLowerCase().trim();
   const cl=$('#gClient').value, kd=$('#gKind').value, st=$('#gStatus').value;
-  const rows = DOCS.filter(d=>{
+  return DOCS.filter(d=>{
     if(cl && d.client_name!==cl) return false;
     if(kd && d.doc_kind!==kd) return false;
     if(st && d.status!==st) return false;
     if(q && !((d.file_name||'').toLowerCase().includes(q) || (d.client_name||'').toLowerCase().includes(q))) return false;
     return true;
   });
+}
+
+function renderDocs(){
+  const rows = filteredDocs();
   const t=$('#docTable');
   if(!rows.length){
     t.innerHTML = '<tr><td style="padding:18px;color:var(--muted)">No documents match. Clients\u2019 attachments appear here once the Collector has run.</td></tr>';
@@ -834,7 +887,7 @@ function renderDocs(){
       <td>${esc(d.file_name)}</td>
       <td>${esc(d.client_name||'\u2014')}</td>
       <td>${pwdInputHTML(d)}</td>
-      <td>${d.status==='new' ? kindSelectHTML(d)
+      <td>${d.status==='new' ? kindSelectHTML(d) + suggestReasonHTML(d)
         : `<span class="kind${(!d.doc_kind||d.doc_kind==='other')?' other':''}">${esc(DOC_KINDS[d.doc_kind]||d.doc_kind||'Unclassified')}</span>`}</td>
       <td>${esc(d.period||'\u2014')}</td>
       <td>#${esc(d.ref_no)}</td>
@@ -879,6 +932,65 @@ async function sendToTdsDesk(){
   }, 8000);
 }
 $('#gPost').onclick = sendToTdsDesk;
+
+async function suggestKinds(){
+  const btn=$('#gSuggest'), msg=$('#gPullMsg');
+  btn.disabled = true;
+  msg.textContent = 'Reading the unclassified documents\u2026 this takes a few seconds per file.';
+  const { error } = await sb.rpc('run_classifier', { p_redo: false });
+  if(error){ msg.textContent='Could not start: '+error.message; btn.disabled=false; return; }
+  setTimeout(async ()=>{
+    await loadDocs();
+    const n = DOCS.filter(d=>(!d.doc_kind||d.doc_kind==='other') && d.suggested_kind).length;
+    msg.textContent = n
+      ? `${n} document${n===1?' has':'s have'} a suggested kind. Check the reason, then Accept \u2014 nothing is saved until you do.`
+      : 'No suggestion could be made. Set the kinds by hand in the Kind column.';
+    btn.disabled = false;
+  }, 20000);
+}
+$('#gSuggest').onclick = suggestKinds;
+
+/**
+ * Accepting in bulk is the one place this page can set many kinds at once, so it
+ * asks twice and says exactly what it is about to save.
+ */
+let acceptArmed = false;
+async function acceptSuggestions(){
+  const btn=$('#gAccept'), msg=$('#gPullMsg');
+  const todo = filteredDocs().filter(d=>
+    (!d.doc_kind || d.doc_kind==='other') && d.suggested_kind && d.status==='new');
+
+  if(!todo.length){
+    acceptArmed=false; btn.textContent='Accept suggestions';
+    msg.textContent = 'Nothing to accept \u2014 no suggestions are waiting on the documents shown.';
+    return;
+  }
+
+  if(!acceptArmed){
+    acceptArmed = true;
+    btn.textContent = `Accept ${todo.length} \u2014 press again`;
+    const by = {};
+    todo.forEach(d=>{ by[d.suggested_kind]=(by[d.suggested_kind]||0)+1; });
+    const low = todo.filter(d=>d.suggest_conf==='low').length;
+    msg.textContent = 'About to set: '
+      + Object.entries(by).map(([k,n])=>`${n} ${DOC_KINDS[k]}`).join(', ')
+      + (low ? ` \u2014 ${low} of them low confidence, worth opening first.` : '.')
+      + ' Press the button again to save, or change any box by hand instead.';
+    setTimeout(()=>{ acceptArmed=false; btn.textContent='Accept suggestions'; }, 15000);
+    return;
+  }
+
+  acceptArmed = false; btn.textContent='Accept suggestions'; btn.disabled = true;
+  let ok=0, bad=0;
+  for(const d of todo){
+    const err = await saveKind(d.intake_id, d.suggested_kind);
+    if(err) bad++; else ok++;
+  }
+  btn.disabled = false;
+  await loadDocs();
+  msg.textContent = `${ok} saved${bad?`, ${bad} could not be saved`:''}. They are ready for TDS Desk.`;
+}
+$('#gAccept').onclick = acceptSuggestions;
 ['#gSearch','#gClient','#gKind','#gStatus'].forEach(s=>{
   const el=$(s); el.addEventListener(s==='#gSearch'?'input':'change', renderDocs);
 });
